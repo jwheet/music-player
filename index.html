@@ -92,7 +92,7 @@
         text-shadow: 0 1px 0 rgba(0,0,0,0.35);
       }
       .lyrics-line:hover {
-        color: rgba(255,255,255,0.8);
+        color: rgba(255,255,255,0.3);
         transform: translateX(4px);
       }
       .lyrics-line.current {
@@ -118,7 +118,7 @@
         -webkit-backdrop-filter: blur(10px);
         border: 1px solid rgba(255, 255, 255, 0.2);
         border-radius: 8px;
-        padding: 8px 10px;
+        padding: 0;
         color: #fff;
         cursor: pointer;
         font-size: 16px;
@@ -129,6 +129,11 @@
         height: 36px;
         transition: all 0.3s ease;
         box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+      }
+      .lyrics-controls .btn i {
+        margin: 0;
+        padding: 0;
+        line-height: 1;
       }
       .lyrics-controls .btn:hover {
         background: rgba(255, 255, 255, 0.25);
