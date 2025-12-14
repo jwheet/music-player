@@ -9,7 +9,7 @@
     <link rel="stylesheet" href="style.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jsmediatags/3.9.5/jsmediatags.min.js"></script>
 
-    <!-- Minimal styles used to hide the UI while metadata loads -->
+    <!-- Minimal styles used to hide the UI while metadata loads and to style lyrics -->
     <style>
       /* While loading, hide the main UI pieces (keeps layout stable if you want) */
       .player-container.loading .img-container img,
@@ -37,6 +37,44 @@
         animation: spin 1s linear infinite;
       }
       @keyframes spin { to { transform: rotate(360deg); } }
+
+      /* Lyrics area (Spotify-like centered current line, faded neighbors) */
+      .lyrics-wrapper {
+        width: 100%;
+        max-height: 220px;
+        margin: 12px 0 0;
+        overflow: hidden; /* hide overflow; we will scroll inner container */
+        display: flex;
+        justify-content: center;
+        align-items: center;
+      }
+      .lyrics {
+        width: 100%;
+        max-height: 220px;
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
+        padding: 8px 12px;
+        box-sizing: border-box;
+        text-align: center;
+      }
+      .lyrics-line {
+        color: rgba(255,255,255,0.55);
+        font-size: 15px;
+        line-height: 1.6;
+        margin: 8px 0;
+        transition: color 160ms linear, transform 160ms linear, font-size 160ms linear;
+        will-change: transform, color;
+        pointer-events: none;
+      }
+      .lyrics-line.current {
+        color: #ffffff;
+        font-size: 18px;
+        font-weight: 600;
+        transform: scale(1.02);
+      }
+
+      /* Hide lyrics wrapper if no lyrics */
+      .lyrics-wrapper.hidden { display: none; }
     </style>
 </head>
 <body>
@@ -69,6 +107,11 @@
             <i class="fas fa-backward" id="prev" title="Previous"></i>
             <i class="fas fa-play main-button" id="play" title="Play"></i>
             <i class="fas fa-forward" id="next" title="Next"></i>
+        </div>
+
+        <!-- Lyrics (Spotify-style, centered current line) -->
+        <div class="lyrics-wrapper hidden" id="lyrics-wrapper">
+          <div class="lyrics" id="lyrics" aria-live="polite" aria-atomic="true"></div>
         </div>
     </div>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/color-thief/2.3.0/color-thief.umd.js"></script>
