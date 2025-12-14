@@ -34,6 +34,18 @@ const lyricsFullscreenIcon = document.getElementById('lyrics-fullscreen-icon');
 let lyricsLines = []; // {time:number, text:string}
 let currentLyricIndex = -1;
 
+// Playlist state management
+let playlist = [];
+let currentTrackIndex = 0;
+const STORAGE_KEY_TRACK = 'musicPlayerCurrentTrack';
+const STORAGE_KEY_TIME = 'musicPlayerCurrentTime';
+
+// GitHub API configuration
+const GITHUB_API_BASE = 'https://api.github.com';
+const MUSIC_FOLDER_PATH = 'music';
+const PLAYLIST_CACHE_KEY = 'githubMusicPlaylistCache';
+const PLAYLIST_CACHE_DURATION = 60 * 60 * 1000; // 1 hour
+
 // ColorThief instance (uses UMD build loaded in HTML)
 const colorThief = window.ColorThief ? new window.ColorThief() : null;
 
@@ -181,7 +193,16 @@ function togglePlay() {
     console.warn('No audio source to play.');
     return;
   }
+
   if (audio.paused) {
+    // If at end of playlist, restart from beginning
+    if (playlist.length > 0 &&
+        currentTrackIndex >= playlist.length - 1 &&
+        audio.currentTime >= audio.duration - 0.5) {
+      loadSong(0, true);
+      return;
+    }
+
     const playPromise = audio.play();
     if (playPromise !== undefined) {
       playPromise.then(() => {
@@ -453,6 +474,304 @@ function readTagsFromUrlWithTimeout(url, timeoutMs = 3500) {
   ]);
 }
 
+// -------------------- GitHub API Integration --------------------
+
+/**
+ * Detect GitHub repository from GitHub Pages URL
+ * Returns {owner, repo} or null if not GitHub Pages
+ */
+function detectGitHubRepo() {
+  const hostname = window.location.hostname;
+  const pathname = window.location.pathname;
+
+  // Extract owner from hostname (e.g., "jwheet.github.io")
+  const parts = hostname.split('.');
+  if (parts.length < 3 || parts[1] !== 'github' || parts[2] !== 'io') {
+    return null; // Not a GitHub Pages site
+  }
+
+  const owner = parts[0];
+
+  // Extract repo from pathname
+  // pathname: "/music-player/" → repo: "music-player"
+  // pathname: "/" → repo: "{owner}.github.io" (user page)
+  const pathSegments = pathname.split('/').filter(s => s.length > 0);
+  const repo = pathSegments.length > 0 ? pathSegments[0] : `${owner}.github.io`;
+
+  return { owner, repo };
+}
+
+/**
+ * Fetch music files from GitHub API
+ */
+async function fetchMusicFilesFromGitHub(owner, repo, branch = 'main') {
+  const apiUrl = `${GITHUB_API_BASE}/repos/${owner}/${repo}/contents/${MUSIC_FOLDER_PATH}`;
+
+  try {
+    const response = await fetch(apiUrl, {
+      headers: {
+        'Accept': 'application/vnd.github.v3+json'
+      },
+      cache: 'no-cache'
+    });
+
+    // Check rate limit
+    const remaining = response.headers.get('X-RateLimit-Remaining');
+    if (remaining !== null && parseInt(remaining) < 5) {
+      console.warn(`GitHub API rate limit low: ${remaining} requests remaining`);
+    }
+
+    if (!response.ok) {
+      // Try 'master' branch if 'main' fails
+      if (branch === 'main') {
+        console.log('Trying master branch...');
+        return await fetchMusicFilesFromGitHub(owner, repo, 'master');
+      }
+      throw new Error(`GitHub API error: ${response.status} ${response.statusText}`);
+    }
+
+    const files = await response.json();
+
+    // Filter for FLAC files only
+    return files.filter(file =>
+      file.type === 'file' &&
+      file.name.toLowerCase().endsWith('.flac')
+    );
+  } catch (error) {
+    console.error('Failed to fetch from GitHub API:', error);
+    throw error;
+  }
+}
+
+/**
+ * Parse filename to extract track number, title, artist
+ * Format: "[NUMBER].[TITLE] - [ARTIST].flac"
+ */
+function parseFilenameGitHub(filename) {
+  // Remove extension
+  const nameWithoutExt = filename.replace(/\.[^.]+$/, '');
+
+  // Extract track number (everything before first period)
+  const firstDotIndex = nameWithoutExt.indexOf('.');
+  if (firstDotIndex === -1) return null;
+
+  const trackNumberStr = nameWithoutExt.substring(0, firstDotIndex);
+  const trackNumber = parseInt(trackNumberStr, 10);
+  if (isNaN(trackNumber)) return null;
+
+  // Extract title and artist (format: "TITLE - ARTIST")
+  const remainder = nameWithoutExt.substring(firstDotIndex + 1);
+  const dashIndex = remainder.lastIndexOf(' - ');
+
+  let title = remainder;
+  let artist = '';
+
+  if (dashIndex !== -1) {
+    title = remainder.substring(0, dashIndex).trim();
+    artist = remainder.substring(dashIndex + 3).trim();
+  }
+
+  return { trackNumber, title, artist };
+}
+
+/**
+ * Build playlist from GitHub file objects
+ */
+function buildPlaylistFromGitHubFiles(githubFiles) {
+  const songs = [];
+
+  for (const file of githubFiles) {
+    const metadata = parseFilenameGitHub(file.name);
+    if (!metadata) {
+      console.warn(`Could not parse filename: ${file.name}`);
+      continue;
+    }
+
+    songs.push({
+      path: file.path, // e.g., "music/1.Abigail - Frankie Cosmos.flac"
+      trackNumber: metadata.trackNumber,
+      title: metadata.title,
+      artist: metadata.artist
+    });
+  }
+
+  // Sort by track number
+  songs.sort((a, b) => a.trackNumber - b.trackNumber);
+
+  return songs;
+}
+
+/**
+ * Get cached playlist from localStorage
+ */
+function getCachedPlaylist() {
+  try {
+    const cached = localStorage.getItem(PLAYLIST_CACHE_KEY);
+    if (!cached) return null;
+
+    const data = JSON.parse(cached);
+    const age = Date.now() - data.timestamp;
+
+    // Return cached data if less than 1 hour old
+    if (age < PLAYLIST_CACHE_DURATION) {
+      console.log(`Using cached playlist (age: ${Math.round(age / 1000 / 60)} minutes)`);
+      return data.playlist;
+    }
+
+    console.log('Cache expired, fetching fresh data');
+    return null;
+  } catch (err) {
+    console.warn('Cache read error:', err);
+    return null;
+  }
+}
+
+/**
+ * Save playlist to localStorage cache
+ */
+function setCachedPlaylist(playlist) {
+  try {
+    const data = {
+      timestamp: Date.now(),
+      playlist: playlist
+    };
+    localStorage.setItem(PLAYLIST_CACHE_KEY, JSON.stringify(data));
+  } catch (err) {
+    console.warn('Cache write error:', err);
+  }
+}
+
+/**
+ * Load playlist with multi-tier fallback strategy
+ */
+async function loadPlaylistWithFallbacks() {
+  // Tier 1: Try cached GitHub data
+  const cached = getCachedPlaylist();
+  if (cached && cached.length > 0) {
+    console.log('✓ Loaded playlist from cache');
+    return cached;
+  }
+
+  // Tier 2: Try fresh GitHub API fetch
+  try {
+    const repoInfo = detectGitHubRepo();
+    if (repoInfo) {
+      console.log(`Fetching from GitHub API: ${repoInfo.owner}/${repoInfo.repo}`);
+      const githubFiles = await fetchMusicFilesFromGitHub(repoInfo.owner, repoInfo.repo);
+      const playlist = buildPlaylistFromGitHubFiles(githubFiles);
+
+      if (playlist.length > 0) {
+        console.log(`✓ Loaded ${playlist.length} songs from GitHub API`);
+        setCachedPlaylist(playlist);
+        return playlist;
+      }
+    } else {
+      console.warn('Not running on GitHub Pages, skipping GitHub API');
+    }
+  } catch (err) {
+    console.warn('GitHub API failed:', err);
+  }
+
+  // Tier 3: Try loading songs.json (legacy fallback)
+  try {
+    const response = await fetch('songs.json', { cache: 'no-cache' });
+    if (response.ok) {
+      const data = await response.json();
+      if (data.songs && Array.isArray(data.songs) && data.songs.length > 0) {
+        console.log('✓ Using legacy songs.json manifest');
+        return data.songs.sort((a, b) => a.trackNumber - b.trackNumber);
+      }
+    }
+  } catch (err) {
+    console.warn('songs.json fallback failed:', err);
+  }
+
+  // Tier 4: Empty playlist (will use hardcoded audio src if present)
+  console.warn('All playlist loading methods failed');
+  return [];
+}
+
+// -------------------- Playlist Management --------------------
+
+/**
+ * Load playlist using GitHub API with fallbacks
+ */
+async function loadPlaylistManifest() {
+  return await loadPlaylistWithFallbacks();
+}
+
+/**
+ * Load a song from the playlist
+ */
+async function loadSong(index, autoPlay = false) {
+  if (!playlist || playlist.length === 0) return;
+
+  index = Math.max(0, Math.min(index, playlist.length - 1));
+  currentTrackIndex = index;
+  const song = playlist[index];
+
+  // Show loading state
+  container.classList.add('loading');
+  if (spinnerWrapper) spinnerWrapper.style.display = '';
+  titleEl.textContent = '';
+  artistEl.textContent = '';
+  coverImg.style.visibility = 'hidden';
+  hideLyrics();
+
+  // Set audio source
+  const absoluteUrl = new URL(song.path, location.href).href;
+  audio.src = absoluteUrl;
+  audio.load();
+
+  // Read metadata
+  try {
+    const tags = await readTagsFromUrlWithTimeout(absoluteUrl, 3500);
+    setMetadataAndCover(tags);
+    if (!tags.title) titleEl.textContent = song.title || getFilenameFromSrc(absoluteUrl);
+    if (!tags.artist) artistEl.textContent = song.artist || '';
+    if (!tags.picture) coverImg.style.visibility = 'visible';
+  } catch (err) {
+    titleEl.textContent = song.title || getFilenameFromSrc(absoluteUrl);
+    artistEl.textContent = song.artist || '';
+    applyGradientFromImage(coverImg);
+  } finally {
+    revealUI();
+    syncPlayButtonIcon();
+    loadLrcForAudioUrl(absoluteUrl);
+  }
+
+  savePlaybackState();
+
+  if (autoPlay) {
+    setTimeout(() => audio.play().catch(err => console.warn('Auto-play failed:', err)), 100);
+  }
+}
+
+/**
+ * State persistence functions
+ */
+function savePlaybackState() {
+  try {
+    localStorage.setItem(STORAGE_KEY_TRACK, String(currentTrackIndex));
+    localStorage.setItem(STORAGE_KEY_TIME, String(audio.currentTime || 0));
+  } catch (err) {}
+}
+
+function restorePlaybackState() {
+  try {
+    const trackIndex = parseInt(localStorage.getItem(STORAGE_KEY_TRACK), 10);
+    const time = parseFloat(localStorage.getItem(STORAGE_KEY_TIME));
+    return {
+      trackIndex: isNaN(trackIndex) ? 0 : trackIndex,
+      time: isNaN(time) ? 0 : time
+    };
+  } catch (err) {
+    return { trackIndex: 0, time: 0 };
+  }
+}
+
+// -------------------- Initialization & wiring --------------------
+
 async function init() {
   container.classList.add('loading');
   if (spinnerWrapper) spinnerWrapper.style.display = '';
@@ -461,26 +780,83 @@ async function init() {
   coverImg.style.visibility = 'hidden';
   hideLyrics();
 
-  // play/progress listeners
+  // Event listeners
   playBtn.addEventListener('click', (e) => { e.preventDefault(); togglePlay(); });
-  if (prevBtn) prevBtn.addEventListener('click', () => { audio.currentTime = 0; });
-  if (nextBtn) nextBtn.addEventListener('click', () => { audio.currentTime = 0; });
 
-  audio.addEventListener('timeupdate', updateProgressUI);
+  // Prev button - Spotify-like behavior
+  if (prevBtn) {
+    prevBtn.addEventListener('click', () => {
+      if (playlist.length === 0) {
+        audio.currentTime = 0;
+        return;
+      }
+      if (audio.currentTime > 3) {
+        audio.currentTime = 0;
+      } else {
+        const newIndex = currentTrackIndex - 1;
+        if (newIndex >= 0) {
+          loadSong(newIndex, !audio.paused);
+        } else {
+          audio.currentTime = 0;
+        }
+      }
+    });
+  }
+
+  // Next button - advance or loop
+  if (nextBtn) {
+    nextBtn.addEventListener('click', () => {
+      if (playlist.length === 0) {
+        audio.currentTime = 0;
+        return;
+      }
+      const newIndex = currentTrackIndex + 1;
+      if (newIndex < playlist.length) {
+        loadSong(newIndex, !audio.paused);
+      } else {
+        loadSong(0, !audio.paused);
+      }
+    });
+  }
+
+  // Progress update with throttled state saving
+  let lastSaveTime = 0;
+  audio.addEventListener('timeupdate', () => {
+    updateProgressUI();
+    const now = Date.now();
+    if (playlist.length > 0 && now - lastSaveTime > 2000) {
+      savePlaybackState();
+      lastSaveTime = now;
+    }
+  });
+
   audio.addEventListener('loadedmetadata', updateProgressUI);
   audio.addEventListener('play', syncPlayButtonIcon);
   audio.addEventListener('pause', syncPlayButtonIcon);
+
+  // Auto-advance on song end
   audio.addEventListener('ended', () => {
-    playBtn.classList.remove('fa-pause');
-    playBtn.classList.add('fa-play');
+    if (playlist.length === 0) {
+      playBtn.classList.remove('fa-pause');
+      playBtn.classList.add('fa-play');
+      return;
+    }
+    if (currentTrackIndex >= playlist.length - 1) {
+      playBtn.classList.remove('fa-pause');
+      playBtn.classList.add('fa-play');
+    } else {
+      loadSong(currentTrackIndex + 1, true);
+    }
   });
 
   if (progressContainer) {
     progressContainer.addEventListener('click', handleProgressClick);
-    progressContainer.addEventListener('touchstart', (e) => { handleProgressClick(e); e.preventDefault(); }, { passive: false });
+    progressContainer.addEventListener('touchstart', (e) => {
+      handleProgressClick(e);
+      e.preventDefault();
+    }, { passive: false });
   }
 
-  // fullscreen button wiring
   if (lyricsFullscreenBtn) {
     lyricsFullscreenBtn.addEventListener('click', (e) => {
       e.preventDefault();
@@ -488,32 +864,41 @@ async function init() {
     });
   }
 
-  // If audio has a src attribute, attempt to read tags and load .lrc
-  const urlAttr = audio.getAttribute('src');
-  const url = urlAttr || audio.src;
-  if (url) {
-    const absoluteUrl = new URL(url, location.href).href;
-    try {
-      const tags = await readTagsFromUrlWithTimeout(absoluteUrl, 3500);
-      setMetadataAndCover(tags);
-      if (!tags.title) titleEl.textContent = getFilenameFromSrc(absoluteUrl);
-      if (!tags.picture) coverImg.style.visibility = 'visible'; // cover might be file in repo
-    } catch (err) {
-      // fallback to filename and try to use existing cover img
-      titleEl.textContent = getFilenameFromSrc(absoluteUrl) || '';
-      artistEl.textContent = '';
-      console.warn('Could not read tags from URL (CORS/timeout).', err);
-      // still try to apply gradient from coverImg if possible
-      applyGradientFromImage(coverImg);
-    } finally {
-      revealUI();
-      syncPlayButtonIcon();
-      // fire-and-forget LRC load
-      loadLrcForAudioUrl(absoluteUrl);
+  // Load playlist
+  playlist = await loadPlaylistManifest();
+
+  if (playlist.length > 0) {
+    const savedState = restorePlaybackState();
+    await loadSong(savedState.trackIndex, false);
+    if (savedState.time > 0 && savedState.time < audio.duration) {
+      audio.currentTime = savedState.time;
     }
-  } else {
     revealUI();
     syncPlayButtonIcon();
+  } else {
+    // Fallback to hardcoded src if manifest fails
+    const urlAttr = audio.getAttribute('src');
+    const url = urlAttr || audio.src;
+    if (url) {
+      const absoluteUrl = new URL(url, location.href).href;
+      try {
+        const tags = await readTagsFromUrlWithTimeout(absoluteUrl, 3500);
+        setMetadataAndCover(tags);
+        if (!tags.title) titleEl.textContent = getFilenameFromSrc(absoluteUrl);
+        if (!tags.picture) coverImg.style.visibility = 'visible';
+      } catch (err) {
+        titleEl.textContent = getFilenameFromSrc(absoluteUrl) || '';
+        artistEl.textContent = '';
+        applyGradientFromImage(coverImg);
+      } finally {
+        revealUI();
+        syncPlayButtonIcon();
+        loadLrcForAudioUrl(absoluteUrl);
+      }
+    } else {
+      revealUI();
+      syncPlayButtonIcon();
+    }
   }
 }
 
