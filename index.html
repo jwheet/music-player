@@ -8,18 +8,56 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.10.2/css/all.min.css"/>
     <link rel="stylesheet" href="style.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jsmediatags/3.9.5/jsmediatags.min.js"></script>
+
+    <!-- Minimal styles used to hide the UI while metadata loads -->
+    <style>
+      /* While loading, hide the main UI pieces (keeps layout stable if you want) */
+      .player-container.loading .img-container img,
+      .player-container.loading h2,
+      .player-container.loading h3,
+      .player-container.loading .progress-container,
+      .player-container.loading .player-controls {
+        visibility: hidden;
+        opacity: 0;
+      }
+
+      /* Simple centered spinner shown while loading */
+      .spinner-wrapper {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        min-height: 140px; /* space for album art area */
+      }
+      .spinner {
+        width: 44px;
+        height: 44px;
+        border: 4px solid rgba(0,0,0,0.12);
+        border-top-color: rgba(0,0,0,0.6);
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
 </head>
 <body>
-    <div class="player-container" id="player-container">
+    <div class="player-container loading" id="player-container">
         <div class="img-container">
             <label for="file-input">
             <img draggable="false" src="https://e-cdns-images.dzcdn.net/images/cover/256d2f17d6dfde632b845e757ac41746/500x500-000000-80-0-0.jpg" alt="Album art" crossorigin="anonymous">
             </label>
             <input id="file-input" type="file" multiple accept="audio/*" hidden/>
         </div>
-        <h2 id="title">Lonely</h2>
-        <h3 id="artist">2 Souls</h3>
+
+        <!-- Spinner area placed directly under the image container so it appears while hidden -->
+        <div class="spinner-wrapper" id="spinner-wrapper">
+          <div class="spinner" aria-hidden="true"></div>
+        </div>
+
+        <h2 id="title" aria-live="polite"></h2>
+        <h3 id="artist"></h3>
+        <!-- Keep audio element with id so script can reference it; no autoplay -->
         <audio id="audio" src="music/2.Abigail - Frankie Cosmos.flac" controls hidden></audio>
+
         <div class="progress-container" id="progress-container">
             <div class="progress" id="progress"></div>
             <div class="duration-wrapper">
