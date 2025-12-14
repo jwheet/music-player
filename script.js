@@ -272,6 +272,19 @@ function renderLyrics(lines) {
     el.dataset.time = String(lines[i].time);
     el.dataset.index = String(i);
     el.textContent = lines[i].text || ' ';
+
+    // Add click-to-seek functionality
+    el.addEventListener('click', function() {
+      const seekTime = parseFloat(this.dataset.time);
+      if (!isNaN(seekTime) && audio.duration) {
+        audio.currentTime = seekTime;
+        // Auto-play if paused
+        if (audio.paused) {
+          togglePlay();
+        }
+      }
+    });
+
     lyricsContainer.appendChild(el);
   }
   currentLyricIndex = -1;
