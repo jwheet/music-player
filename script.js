@@ -1,19 +1,20 @@
 /* script.js
-   Metadata reading (jsmediatags) + static cover behavior + play/pause + progress UI +
-   lyrics (.lrc) loading and Spotify-like synced display.
+   Adds:
+   - lyrics fullscreen toggle (uses Fullscreen API with CSS fallback)
+   - background gradient generated from cover image colors (Color Thief)
+   - kept previous functionality: metadata (jsmediatags), play/pause, progress, LRC lyrics sync
 
-   Behavior:
-   - If an .lrc file exists next to the audio file (same base name), it is fetched and parsed.
-   - Lyrics are displayed centered, current line highlighted; previous/next lines are faded.
-   - Lyrics are synced to audio timeupdate; container scrolls to keep the current line centered.
-   - If no .lrc found, lyrics area is hidden.
+   Notes:
+   - Color extraction requires access to the image pixels. It works reliably when the cover is a data: URL
+     (embedded from tags) or when the image is same-origin / CORS-enabled. If blocked, a default gradient is used.
+   - Fullscreen API is used where available; fallback toggles a CSS "fullscreen-fallback" class.
 */
 
 const audio = document.getElementById('audio');
 const fileInput = document.getElementById('file-input');
 const titleEl = document.getElementById('title');
 const artistEl = document.getElementById('artist');
-const coverImg = document.querySelector('.img-container img');
+const coverImg = document.getElementById('cover-img');
 const container = document.getElementById('player-container');
 const spinnerWrapper = document.getElementById('spinner-wrapper');
 
@@ -27,15 +28,93 @@ const durationEl = document.getElementById('duration');
 
 const lyricsWrapper = document.getElementById('lyrics-wrapper');
 const lyricsContainer = document.getElementById('lyrics');
+const lyricsFullscreenBtn = document.getElementById('lyrics-fullscreen-btn');
+const lyricsFullscreenIcon = document.getElementById('lyrics-fullscreen-icon');
 
 let lyricsLines = []; // {time:number, text:string}
 let currentLyricIndex = -1;
 
-// Helper to convert picture object from jsmediatags to data URL
+// ColorThief instance (uses UMD build loaded in HTML)
+const colorThief = window.ColorThief ? new window.ColorThief() : null;
+
+// -------------------- Helpers --------------------
+function clamp(v, a = 0, b = 255) { return Math.max(a, Math.min(b, v)); }
+function rgbToCss(rgb) { return `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`; }
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+// Smoothly apply gradient to the body background
+function setBackgroundGradientFromColors(colors = []) {
+  if (!colors || colors.length === 0) {
+    // fallback subtle gradient
+    document.body.style.background = 'linear-gradient(135deg, #0f172a 0%, #0b1220 100%)';
+    return;
+  }
+  // pick up to first 4 colors
+  const picks = colors.slice(0, 4);
+  const stops = picks.map((c, i) => {
+    const pct = Math.round((i / Math.max(1, picks.length - 1)) * 100);
+    return `${rgbToCss(c)} ${pct}%`;
+  }).join(', ');
+  const gradient = `linear-gradient(135deg, ${stops})`;
+  document.body.style.transition = 'background 600ms ease';
+  document.body.style.background = gradient;
+}
+
+// Attempt to build a nice gradient using ColorThief palette
+function applyGradientFromImage(imgEl) {
+  if (!imgEl || !colorThief) {
+    setBackgroundGradientFromColors();
+    return;
+  }
+
+  // Ensure image is loaded
+  if (!imgEl.complete) {
+    // wait for load once
+    imgEl.addEventListener('load', function onLoad() {
+      imgEl.removeEventListener('load', onLoad);
+      _extractAndApply(imgEl);
+    });
+  } else {
+    _extractAndApply(imgEl);
+  }
+
+  function _extractAndApply(img) {
+    try {
+      // ColorThief may throw if canvas is tainted (CORS). Catch and fallback.
+      // Use palette of 5 colors for variety
+      const palette = colorThief.getPalette(img, 5);
+      if (!palette || palette.length === 0) {
+        setBackgroundGradientFromColors();
+        return;
+      }
+      // Optionally sort by perceived brightness to make gradient pleasant
+      const withLum = palette.map(c => {
+        const lum = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+        return { c, lum };
+      }).sort((a, b) => a.lum - b.lum);
+
+      // pick darkest -> mid -> lightest for gradient
+      const colorsForGradient = [
+        withLum[0].c,
+        withLum[Math.floor(withLum.length / 2)].c,
+        withLum[withLum.length - 1].c
+      ].filter(Boolean);
+
+      setBackgroundGradientFromColors(colorsForGradient);
+    } catch (err) {
+      // likely CORS/tainted canvas; fallback to default gradient
+      console.warn('Could not extract palette from cover image (CORS?):', err);
+      setBackgroundGradientFromColors();
+    }
+  }
+}
+
+// Converts jsmediatags picture -> data URL
 function pictureToDataURL(picture) {
   if (!picture || !picture.data) return null;
   const byteArray = picture.data;
   let binary = '';
+  // build binary string (works for typical cover sizes)
   for (let i = 0; i < byteArray.length; i++) {
     binary += String.fromCharCode(byteArray[i]);
   }
@@ -43,84 +122,32 @@ function pictureToDataURL(picture) {
   return `data:${picture.format};base64,${base64}`;
 }
 
-// Set UI fields; when called we populate the UI but do not autoplay anything.
-// options.setCover: whether to overwrite the cover image
-function setMetadata({ title, artist, picture } = {}, options = { setCover: true }) {
+// -------------------- Metadata / cover / gradient wiring --------------------
+function setMetadataAndCover({ title, artist, picture } = {}) {
   titleEl.textContent = title || titleEl.textContent || '';
   artistEl.textContent = artist || artistEl.textContent || '';
-  if (options.setCover && picture) {
+
+  // If tags include picture, use it (data URL) — this is best for ColorThief
+  if (picture && picture.data) {
     const dataUrl = pictureToDataURL(picture);
     if (dataUrl) {
       coverImg.src = dataUrl;
       coverImg.style.visibility = 'visible';
+      // after setting cover to data url, ColorThief can access it
+      applyGradientFromImage(coverImg);
+      return;
     }
+  }
+
+  // Otherwise try to use current coverImg src (may be same-origin or CORS-enabled)
+  if (coverImg.src) {
+    applyGradientFromImage(coverImg);
+  } else {
+    setBackgroundGradientFromColors();
   }
 }
 
-// fallback filename extraction
-function getFilenameFromSrc(src) {
-  if (!src) return '';
-  try {
-    const url = new URL(src, location.href);
-    return decodeURIComponent(url.pathname.split('/').pop());
-  } catch (e) {
-    return src.split('/').pop();
-  }
-}
-
-// Try to read tags from a URL (may fail on GitHub Pages due to CORS)
-function readTagsFromUrl(url) {
-  return new Promise((resolve, reject) => {
-    try {
-      new jsmediatags.Reader(url)
-        .setTagsToRead(['title', 'artist', 'picture'])
-        .read({
-          onSuccess: function(tag) {
-            resolve(tag.tags);
-          },
-          onError: function(error) {
-            reject(error);
-          }
-        });
-    } catch (err) {
-      reject(err);
-    }
-  });
-}
-
-// Read tags from a File object (preferred when user picks local file)
-function readTagsFromFile(file) {
-  return new Promise((resolve, reject) => {
-    try {
-      jsmediatags.read(file, {
-        onSuccess: function(tag) {
-          resolve(tag.tags);
-        },
-        onError: function(err) {
-          reject(err);
-        }
-      });
-    } catch (err) {
-      reject(err);
-    }
-  });
-}
-
-// Reveal UI (remove loading state)
-function revealUI() {
-  container.classList.remove('loading');
-  if (spinnerWrapper) spinnerWrapper.style.display = 'none';
-}
-
-// A timeout wrapper so readTagsFromUrl can't hang forever
-function readTagsFromUrlWithTimeout(url, timeoutMs = 3500) {
-  return Promise.race([
-    readTagsFromUrl(url),
-    new Promise((_, reject) => setTimeout(() => reject(new Error('tag-read-timeout')), timeoutMs))
-  ]);
-}
-
-// --- Playback UI helpers ---
+// -------------------- Playback UI helpers --------------------
 function formatTime(seconds = 0) {
   seconds = Math.max(0, Math.floor(seconds));
   const m = Math.floor(seconds / 60);
@@ -184,8 +211,7 @@ function syncPlayButtonIcon() {
   }
 }
 
-// --- Lyrics loading/parsing/rendering ---
-
+// -------------------- LRC lyrics --------------------
 function fetchWithTimeout(url, timeoutMs = 3500) {
   return Promise.race([
     fetch(url, {cache: "no-cache"}),
@@ -194,15 +220,11 @@ function fetchWithTimeout(url, timeoutMs = 3500) {
 }
 
 function loadLrcForAudioUrl(audioUrl) {
-  // only try if it's a real URL (not blob:)
   if (!audioUrl || audioUrl.startsWith('blob:')) {
     hideLyrics();
     return;
   }
-
-  // Replace extension with .lrc
   const lrcUrl = audioUrl.replace(/\.[^/.]+$/, '.lrc');
-
   fetchWithTimeout(lrcUrl, 3500)
     .then(res => {
       if (!res.ok) throw new Error('no-lrc');
@@ -218,38 +240,32 @@ function loadLrcForAudioUrl(audioUrl) {
       }
     })
     .catch(err => {
-      // no lrc or fetch failed -> hide lyrics
       console.warn('No .lrc found or fetch failed:', err);
       hideLyrics();
     });
 }
 
 function parseLRC(lrcText) {
-  // returns array of {time:number, text:string}, sorted ascending
   const result = [];
   const lines = lrcText.split(/\r?\n/);
   for (const line of lines) {
-    // find all timestamp markers in the line
     const timeMarks = [...line.matchAll(/\[(\d+):(\d+)(?:\.(\d+))?\]/g)];
     if (timeMarks.length === 0) continue;
-    // strip timestamps to get text
     const text = line.replace(/\[(\d+):(\d+)(?:\.(\d+))?\]/g, '').trim();
     for (const m of timeMarks) {
       const min = parseInt(m[1], 10);
       const sec = parseInt(m[2], 10);
-      const frac = m[3] ? parseInt(m[3].padEnd(3, '0'), 10) : 0; // milliseconds or centiseconds
+      const frac = m[3] ? parseInt(m[3].padEnd(3, '0'), 10) : 0;
       const time = min * 60 + sec + (frac / 1000);
       result.push({ time, text });
     }
   }
-  // sort by time
   result.sort((a, b) => a.time - b.time);
   return result;
 }
 
 function renderLyrics(lines) {
-  // create DOM lines
-  lyricsContainer.innerHTML = ''; // clear
+  lyricsContainer.innerHTML = '';
   for (let i = 0; i < lines.length; i++) {
     const el = document.createElement('div');
     el.className = 'lyrics-line';
@@ -274,13 +290,9 @@ function hideLyrics() {
 
 function updateLyrics(currentTime) {
   if (!lyricsLines || lyricsLines.length === 0) return;
-
-  // find the last index where time <= currentTime
   let idx = -1;
-  // optimize: if currentLyricIndex valid and currentTime >= its time, search forward only
   if (currentLyricIndex >= 0 && currentLyricIndex < lyricsLines.length &&
       currentTime >= lyricsLines[currentLyricIndex].time) {
-    // search forward
     for (let i = currentLyricIndex; i < lyricsLines.length; i++) {
       if (i === lyricsLines.length - 1 || (lyricsLines[i+1].time > currentTime && lyricsLines[i].time <= currentTime)) {
         idx = i;
@@ -288,7 +300,6 @@ function updateLyrics(currentTime) {
       }
     }
   } else {
-    // full search (or backward)
     for (let i = 0; i < lyricsLines.length; i++) {
       if (i === lyricsLines.length - 1 || (lyricsLines[i].time <= currentTime && lyricsLines[i+1].time > currentTime)) {
         if (lyricsLines[i].time <= currentTime) idx = i;
@@ -301,15 +312,12 @@ function updateLyrics(currentTime) {
   }
 
   if (idx !== currentLyricIndex) {
-    // update classes
     const prevEl = lyricsContainer.querySelector('.lyrics-line.current');
     if (prevEl) prevEl.classList.remove('current');
     if (idx >= 0) {
       const newEl = lyricsContainer.querySelector(`.lyrics-line[data-index="${idx}"]`);
       if (newEl) {
         newEl.classList.add('current');
-        // scroll so the current line is centered in the lyrics container
-        // use smooth scrolling for nicer effect, but don't call too frequently
         newEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
       }
     }
@@ -317,9 +325,122 @@ function updateLyrics(currentTime) {
   }
 }
 
-// --- Initialization & event wiring ---
+// -------------------- Fullscreen lyrics handling --------------------
+function isFullscreenSupported() {
+  return !!(document.fullscreenEnabled || document.webkitFullscreenEnabled || document.mozFullScreenEnabled || document.msFullscreenEnabled);
+}
+
+function enterFullscreenForElement(el) {
+  if (!el) return;
+  // Prefer Fullscreen API
+  if (el.requestFullscreen) return el.requestFullscreen();
+  if (el.webkitRequestFullscreen) return el.webkitRequestFullscreen();
+  if (el.mozRequestFullScreen) return el.mozRequestFullScreen();
+  if (el.msRequestFullscreen) return el.msRequestFullscreen();
+  // Fallback: add class to style as fullscreen overlay
+  el.classList.add('fullscreen-fallback');
+  document.documentElement.style.overflow = 'hidden';
+  lyricsFullscreenBtn.setAttribute('aria-pressed', 'true');
+  lyricsFullscreenIcon.classList.remove('fa-expand');
+  lyricsFullscreenIcon.classList.add('fa-compress');
+}
+
+function exitFullscreenFallback(el) {
+  el.classList.remove('fullscreen-fallback');
+  document.documentElement.style.overflow = '';
+  lyricsFullscreenBtn.setAttribute('aria-pressed', 'false');
+  lyricsFullscreenIcon.classList.remove('fa-compress');
+  lyricsFullscreenIcon.classList.add('fa-expand');
+}
+
+function exitFullscreen() {
+  if (document.exitFullscreen) return document.exitFullscreen();
+  if (document.webkitExitFullscreen) return document.webkitExitFullscreen();
+  if (document.mozCancelFullScreen) return document.mozCancelFullScreen();
+  if (document.msExitFullscreen) return document.msExitFullscreen();
+  // fallback
+  exitFullscreenFallback(lyricsWrapper);
+}
+
+function toggleLyricsFullscreen() {
+  const inFs = !!(document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement);
+  if (!inFs) {
+    if (isFullscreenSupported()) {
+      enterFullscreenForElement(lyricsWrapper).catch(() => {
+        // if requestFullscreen fails, fallback to class
+        lyricsWrapper.classList.add('fullscreen-fallback');
+        lyricsFullscreenBtn.setAttribute('aria-pressed', 'true');
+        lyricsFullscreenIcon.classList.remove('fa-expand');
+        lyricsFullscreenIcon.classList.add('fa-compress');
+      });
+    } else {
+      // fallback
+      lyricsWrapper.classList.add('fullscreen-fallback');
+      lyricsFullscreenBtn.setAttribute('aria-pressed', 'true');
+      lyricsFullscreenIcon.classList.remove('fa-expand');
+      lyricsFullscreenIcon.classList.add('fa-compress');
+    }
+  } else {
+    exitFullscreen();
+  }
+}
+
+// Update fullscreen icon on fullscreenchange events (keeps UI in sync)
+function onFullscreenChange() {
+  const fsEl = document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement;
+  if (fsEl === lyricsWrapper) {
+    lyricsFullscreenBtn.setAttribute('aria-pressed', 'true');
+    lyricsFullscreenIcon.classList.remove('fa-expand');
+    lyricsFullscreenIcon.classList.add('fa-compress');
+  } else {
+    // If we previously used fallback class, remove it
+    if (lyricsWrapper.classList.contains('fullscreen-fallback')) {
+      exitFullscreenFallback(lyricsWrapper);
+    }
+    lyricsFullscreenBtn.setAttribute('aria-pressed', 'false');
+    lyricsFullscreenIcon.classList.remove('fa-compress');
+    lyricsFullscreenIcon.classList.add('fa-expand');
+  }
+}
+
+// Ensure we listen for fullscreen change to update icon
+['fullscreenchange', 'webkitfullscreenchange', 'mozfullscreenchange', 'MSFullscreenChange'].forEach(evt => {
+  document.addEventListener(evt, onFullscreenChange);
+});
+
+// -------------------- Initialization & wiring --------------------
+function readTagsFromUrl(url) {
+  return new Promise((resolve, reject) => {
+    try {
+      new jsmediatags.Reader(url)
+        .setTagsToRead(['title', 'artist', 'picture'])
+        .read({
+          onSuccess: function(tag) { resolve(tag.tags); },
+          onError: function(err) { reject(err); }
+        });
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+function readTagsFromFile(file) {
+  return new Promise((resolve, reject) => {
+    try {
+      jsmediatags.read(file, {
+        onSuccess: function(tag) { resolve(tag.tags); },
+        onError: function(err) { reject(err); }
+      });
+    } catch (err) { reject(err); }
+  });
+}
+function readTagsFromUrlWithTimeout(url, timeoutMs = 3500) {
+  return Promise.race([
+    readTagsFromUrl(url),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('tag-read-timeout')), timeoutMs))
+  ]);
+}
+
 async function init() {
-  // Put UI into loading state and hide text + art until we finish
   container.classList.add('loading');
   if (spinnerWrapper) spinnerWrapper.style.display = '';
   titleEl.textContent = '';
@@ -327,11 +448,8 @@ async function init() {
   coverImg.style.visibility = 'hidden';
   hideLyrics();
 
-  // Attach event listeners for playback/progress
-  playBtn.addEventListener('click', (e) => {
-    e.preventDefault();
-    togglePlay();
-  });
+  // play/progress listeners
+  playBtn.addEventListener('click', (e) => { e.preventDefault(); togglePlay(); });
   if (prevBtn) prevBtn.addEventListener('click', () => { audio.currentTime = 0; });
   if (nextBtn) nextBtn.addEventListener('click', () => { audio.currentTime = 0; });
 
@@ -346,30 +464,38 @@ async function init() {
 
   if (progressContainer) {
     progressContainer.addEventListener('click', handleProgressClick);
-    progressContainer.addEventListener('touchstart', (e) => {
-      handleProgressClick(e);
-      e.preventDefault();
-    }, { passive: false });
+    progressContainer.addEventListener('touchstart', (e) => { handleProgressClick(e); e.preventDefault(); }, { passive: false });
   }
 
-  // If audio has a src attribute, attempt to read tags via URL Reader and try to load .lrc
+  // fullscreen button wiring
+  if (lyricsFullscreenBtn) {
+    lyricsFullscreenBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      toggleLyricsFullscreen();
+    });
+  }
+
+  // If audio has a src attribute, attempt to read tags and load .lrc
   const urlAttr = audio.getAttribute('src');
   const url = urlAttr || audio.src;
   if (url) {
     const absoluteUrl = new URL(url, location.href).href;
     try {
       const tags = await readTagsFromUrlWithTimeout(absoluteUrl, 3500);
-      setMetadata(tags, { setCover: true });
+      setMetadataAndCover(tags);
       if (!tags.title) titleEl.textContent = getFilenameFromSrc(absoluteUrl);
-      if (!tags.picture) coverImg.style.visibility = 'hidden';
+      if (!tags.picture) coverImg.style.visibility = 'visible'; // cover might be file in repo
     } catch (err) {
+      // fallback to filename and try to use existing cover img
       titleEl.textContent = getFilenameFromSrc(absoluteUrl) || '';
       artistEl.textContent = '';
-      console.warn('Could not read tags from URL (CORS, timeout or not accessible). Fallback to filename.', err);
+      console.warn('Could not read tags from URL (CORS/timeout).', err);
+      // still try to apply gradient from coverImg if possible
+      applyGradientFromImage(coverImg);
     } finally {
       revealUI();
       syncPlayButtonIcon();
-      // attempt to load .lrc (fire-and-forget)
+      // fire-and-forget LRC load
       loadLrcForAudioUrl(absoluteUrl);
     }
   } else {
@@ -378,13 +504,11 @@ async function init() {
   }
 }
 
-// Handle user selecting a file (prefer reading tags from File object)
 fileInput.addEventListener('change', async (e) => {
   const files = e.target.files;
   if (!files || files.length === 0) return;
   const file = files[0];
 
-  // Keep UI in loading while reading file tags
   container.classList.add('loading');
   if (spinnerWrapper) spinnerWrapper.style.display = '';
   titleEl.textContent = '';
@@ -392,31 +516,44 @@ fileInput.addEventListener('change', async (e) => {
   coverImg.style.visibility = 'hidden';
   hideLyrics();
 
-  // point audio to the selected file (object URL) but do not play it
   const objectUrl = URL.createObjectURL(file);
   audio.src = objectUrl;
   audio.load();
 
   try {
     const tags = await readTagsFromFile(file);
-    // Update title/artist/cover (cover will overwrite previous)
-    setMetadata(tags, { setCover: true });
+    setMetadataAndCover(tags);
     if (!tags.title) titleEl.textContent = file.name;
     if (!tags.artist) artistEl.textContent = '';
-    if (!tags.picture) coverImg.style.visibility = 'hidden';
   } catch (err) {
-    // If reading tags fails, fallback to filename; keep no cover
     titleEl.textContent = file.name;
     artistEl.textContent = '';
-    coverImg.style.visibility = 'hidden';
+    coverImg.style.visibility = 'visible';
+    applyGradientFromImage(coverImg);
     console.warn('Could not read tags from selected file.', err);
   } finally {
     revealUI();
     syncPlayButtonIcon();
-    // For user-picked local file, .lrc next to the audio file won't be reachable.
-    // You could allow uploading a .lrc file in the UI — we did not add upload here.
+    // NOTE: local .lrc next to local file isn't accessible; you could add an upload option.
   }
 });
 
-// Kick off initial load
+// reveal UI helper
+function revealUI() {
+  container.classList.remove('loading');
+  if (spinnerWrapper) spinnerWrapper.style.display = 'none';
+}
+
+// filename fallback
+function getFilenameFromSrc(src) {
+  if (!src) return '';
+  try {
+    const url = new URL(src, location.href);
+    return decodeURIComponent(url.pathname.split('/').pop());
+  } catch (e) {
+    return src.split('/').pop();
+  }
+}
+
+// Kick off
 init();
