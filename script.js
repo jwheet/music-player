@@ -2,6 +2,8 @@
    Reads metadata (title, artist, cover) using jsmediatags and updates the UI.
    The UI stays hidden until metadata read completes (success or failure).
    Cover is taken from the audio file and kept static unless user picks a new file.
+   Added a timeout so the page can't hang indefinitely when trying to read tags from a URL.
+   While loading: title/artist/art are hidden. After success they appear; on failure the filename is shown and art remains hidden.
 */
 
 const audio = document.getElementById('audio');
@@ -32,7 +34,10 @@ function setMetadata({ title, artist, picture } = {}, options = { setCover: true
   artistEl.textContent = artist || artistEl.textContent || '';
   if (options.setCover && picture) {
     const dataUrl = pictureToDataURL(picture);
-    if (dataUrl) coverImg.src = dataUrl;
+    if (dataUrl) {
+      coverImg.src = dataUrl;
+      coverImg.style.visibility = 'visible';
+    }
   }
 }
 
@@ -91,11 +96,23 @@ function revealUI() {
   if (spinnerWrapper) spinnerWrapper.style.display = 'none';
 }
 
+// A timeout wrapper so readTagsFromUrl can't hang forever
+function readTagsFromUrlWithTimeout(url, timeoutMs = 3500) {
+  return Promise.race([
+    readTagsFromUrl(url),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('tag-read-timeout')), timeoutMs))
+  ]);
+}
+
 // Initialize: try to read metadata for audio.src (default file). Keep UI hidden until done.
 async function init() {
-  // Ensure UI is in loading state
+  // Put UI into loading state and hide text + art until we finish
   container.classList.add('loading');
   if (spinnerWrapper) spinnerWrapper.style.display = '';
+  titleEl.textContent = '';
+  artistEl.textContent = '';
+  // hide any existing cover while loading to avoid showing old art
+  coverImg.style.visibility = 'hidden';
 
   // If audio has a src attribute, attempt to read tags via URL Reader
   const urlAttr = audio.getAttribute('src');
@@ -103,15 +120,18 @@ async function init() {
   if (url) {
     const absoluteUrl = new URL(url, location.href).href;
     try {
-      const tags = await readTagsFromUrl(absoluteUrl);
+      // this will reject if it times out or if jsmediatags reports an error
+      const tags = await readTagsFromUrlWithTimeout(absoluteUrl, 3500);
       setMetadata(tags, { setCover: true });
-      // If title/artist missing, fallback to filename for title only
+      // If title missing, fallback to filename for title only
       if (!tags.title) titleEl.textContent = getFilenameFromSrc(absoluteUrl);
+      // If there was no picture, keep cover hidden
+      if (!tags.picture) coverImg.style.visibility = 'hidden';
     } catch (err) {
-      // Could not read tags from URL (likely CORS). Use filename fallback.
+      // Timeout or other failure: show filename as title and no cover (still hidden)
       titleEl.textContent = getFilenameFromSrc(absoluteUrl) || '';
       artistEl.textContent = '';
-      console.warn('Could not read tags from URL (CORS or not accessible). Fallback to filename.', err);
+      console.warn('Could not read tags from URL (CORS, timeout or not accessible). Fallback to filename.', err);
     } finally {
       // Reveal UI regardless of success or failure
       revealUI();
@@ -131,6 +151,9 @@ fileInput.addEventListener('change', async (e) => {
   // Keep UI in loading while reading file tags
   container.classList.add('loading');
   if (spinnerWrapper) spinnerWrapper.style.display = '';
+  titleEl.textContent = '';
+  artistEl.textContent = '';
+  coverImg.style.visibility = 'hidden';
 
   // point audio to the selected file (object URL) but do not play it
   const objectUrl = URL.createObjectURL(file);
@@ -143,10 +166,12 @@ fileInput.addEventListener('change', async (e) => {
     setMetadata(tags, { setCover: true });
     if (!tags.title) titleEl.textContent = file.name;
     if (!tags.artist) artistEl.textContent = '';
+    if (!tags.picture) coverImg.style.visibility = 'hidden';
   } catch (err) {
-    // If reading tags fails, fallback to filename
+    // If reading tags fails, fallback to filename; keep no cover
     titleEl.textContent = file.name;
     artistEl.textContent = '';
+    coverImg.style.visibility = 'hidden';
     console.warn('Could not read tags from selected file.', err);
   } finally {
     revealUI();
