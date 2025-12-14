@@ -1,9 +1,12 @@
 /* script.js
-   Metadata reading (jsmediatags) + static cover behavior + play/pause + progress UI.
-   - UI hidden while metadata loads (as before)
-   - Play/pause toggles audio.play()/audio.pause(), updates icon
-   - Progress bar and time display updated on timeupdate; clicking progress seeks
-   - No autoplay; play only after explicit user click
+   Metadata reading (jsmediatags) + static cover behavior + play/pause + progress UI +
+   lyrics (.lrc) loading and Spotify-like synced display.
+
+   Behavior:
+   - If an .lrc file exists next to the audio file (same base name), it is fetched and parsed.
+   - Lyrics are displayed centered, current line highlighted; previous/next lines are faded.
+   - Lyrics are synced to audio timeupdate; container scrolls to keep the current line centered.
+   - If no .lrc found, lyrics area is hidden.
 */
 
 const audio = document.getElementById('audio');
@@ -21,6 +24,12 @@ const progressContainer = document.getElementById('progress-container');
 const progressEl = document.getElementById('progress');
 const currentTimeEl = document.getElementById('current-time');
 const durationEl = document.getElementById('duration');
+
+const lyricsWrapper = document.getElementById('lyrics-wrapper');
+const lyricsContainer = document.getElementById('lyrics');
+
+let lyricsLines = []; // {time:number, text:string}
+let currentLyricIndex = -1;
 
 // Helper to convert picture object from jsmediatags to data URL
 function pictureToDataURL(picture) {
@@ -111,7 +120,7 @@ function readTagsFromUrlWithTimeout(url, timeoutMs = 3500) {
   ]);
 }
 
-// Format seconds -> M:SS
+// --- Playback UI helpers ---
 function formatTime(seconds = 0) {
   seconds = Math.max(0, Math.floor(seconds));
   const m = Math.floor(seconds / 60);
@@ -119,7 +128,6 @@ function formatTime(seconds = 0) {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
-// Update progress UI from audio.currentTime / duration
 function updateProgressUI() {
   const cur = audio.currentTime || 0;
   const dur = audio.duration || 0;
@@ -127,9 +135,11 @@ function updateProgressUI() {
   progressEl.style.width = `${pct}%`;
   currentTimeEl.textContent = formatTime(cur);
   durationEl.textContent = dur ? formatTime(dur) : '0:00';
+
+  // Update lyrics sync
+  updateLyrics(cur);
 }
 
-// Seek when user clicks progress container
 function handleProgressClick(e) {
   const rect = progressContainer.getBoundingClientRect();
   const x = (e.clientX ?? e.touches?.[0]?.clientX) - rect.left;
@@ -139,10 +149,8 @@ function handleProgressClick(e) {
   }
 }
 
-// Toggle play/pause and update icon
 function togglePlay() {
   if (!audio.src) {
-    // no audio source set
     console.warn('No audio source to play.');
     return;
   }
@@ -150,15 +158,12 @@ function togglePlay() {
     const playPromise = audio.play();
     if (playPromise !== undefined) {
       playPromise.then(() => {
-        // play started
         playBtn.classList.remove('fa-play');
         playBtn.classList.add('fa-pause');
       }).catch((err) => {
-        // play failed (shouldn't happen when triggered by click) — log
         console.warn('Play failed:', err);
       });
     } else {
-      // older browsers
       playBtn.classList.remove('fa-play');
       playBtn.classList.add('fa-pause');
     }
@@ -169,7 +174,6 @@ function togglePlay() {
   }
 }
 
-// Ensure play button icon matches current state
 function syncPlayButtonIcon() {
   if (audio.paused) {
     playBtn.classList.remove('fa-pause');
@@ -180,7 +184,140 @@ function syncPlayButtonIcon() {
   }
 }
 
-// Initialize: try to read metadata for audio.src (default file). Keep UI hidden until done.
+// --- Lyrics loading/parsing/rendering ---
+
+function fetchWithTimeout(url, timeoutMs = 3500) {
+  return Promise.race([
+    fetch(url, {cache: "no-cache"}),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('fetch-timeout')), timeoutMs))
+  ]);
+}
+
+function loadLrcForAudioUrl(audioUrl) {
+  // only try if it's a real URL (not blob:)
+  if (!audioUrl || audioUrl.startsWith('blob:')) {
+    hideLyrics();
+    return;
+  }
+
+  // Replace extension with .lrc
+  const lrcUrl = audioUrl.replace(/\.[^/.]+$/, '.lrc');
+
+  fetchWithTimeout(lrcUrl, 3500)
+    .then(res => {
+      if (!res.ok) throw new Error('no-lrc');
+      return res.text();
+    })
+    .then(text => {
+      lyricsLines = parseLRC(text);
+      if (lyricsLines.length === 0) {
+        hideLyrics();
+      } else {
+        renderLyrics(lyricsLines);
+        showLyrics();
+      }
+    })
+    .catch(err => {
+      // no lrc or fetch failed -> hide lyrics
+      console.warn('No .lrc found or fetch failed:', err);
+      hideLyrics();
+    });
+}
+
+function parseLRC(lrcText) {
+  // returns array of {time:number, text:string}, sorted ascending
+  const result = [];
+  const lines = lrcText.split(/\r?\n/);
+  for (const line of lines) {
+    // find all timestamp markers in the line
+    const timeMarks = [...line.matchAll(/\[(\d+):(\d+)(?:\.(\d+))?\]/g)];
+    if (timeMarks.length === 0) continue;
+    // strip timestamps to get text
+    const text = line.replace(/\[(\d+):(\d+)(?:\.(\d+))?\]/g, '').trim();
+    for (const m of timeMarks) {
+      const min = parseInt(m[1], 10);
+      const sec = parseInt(m[2], 10);
+      const frac = m[3] ? parseInt(m[3].padEnd(3, '0'), 10) : 0; // milliseconds or centiseconds
+      const time = min * 60 + sec + (frac / 1000);
+      result.push({ time, text });
+    }
+  }
+  // sort by time
+  result.sort((a, b) => a.time - b.time);
+  return result;
+}
+
+function renderLyrics(lines) {
+  // create DOM lines
+  lyricsContainer.innerHTML = ''; // clear
+  for (let i = 0; i < lines.length; i++) {
+    const el = document.createElement('div');
+    el.className = 'lyrics-line';
+    el.dataset.time = String(lines[i].time);
+    el.dataset.index = String(i);
+    el.textContent = lines[i].text || ' ';
+    lyricsContainer.appendChild(el);
+  }
+  currentLyricIndex = -1;
+}
+
+function showLyrics() {
+  lyricsWrapper.classList.remove('hidden');
+}
+
+function hideLyrics() {
+  lyricsWrapper.classList.add('hidden');
+  lyricsContainer.innerHTML = '';
+  lyricsLines = [];
+  currentLyricIndex = -1;
+}
+
+function updateLyrics(currentTime) {
+  if (!lyricsLines || lyricsLines.length === 0) return;
+
+  // find the last index where time <= currentTime
+  let idx = -1;
+  // optimize: if currentLyricIndex valid and currentTime >= its time, search forward only
+  if (currentLyricIndex >= 0 && currentLyricIndex < lyricsLines.length &&
+      currentTime >= lyricsLines[currentLyricIndex].time) {
+    // search forward
+    for (let i = currentLyricIndex; i < lyricsLines.length; i++) {
+      if (i === lyricsLines.length - 1 || (lyricsLines[i+1].time > currentTime && lyricsLines[i].time <= currentTime)) {
+        idx = i;
+        break;
+      }
+    }
+  } else {
+    // full search (or backward)
+    for (let i = 0; i < lyricsLines.length; i++) {
+      if (i === lyricsLines.length - 1 || (lyricsLines[i].time <= currentTime && lyricsLines[i+1].time > currentTime)) {
+        if (lyricsLines[i].time <= currentTime) idx = i;
+        break;
+      }
+    }
+  }
+  if (idx === -1 && currentTime >= lyricsLines[lyricsLines.length - 1].time) {
+    idx = lyricsLines.length - 1;
+  }
+
+  if (idx !== currentLyricIndex) {
+    // update classes
+    const prevEl = lyricsContainer.querySelector('.lyrics-line.current');
+    if (prevEl) prevEl.classList.remove('current');
+    if (idx >= 0) {
+      const newEl = lyricsContainer.querySelector(`.lyrics-line[data-index="${idx}"]`);
+      if (newEl) {
+        newEl.classList.add('current');
+        // scroll so the current line is centered in the lyrics container
+        // use smooth scrolling for nicer effect, but don't call too frequently
+        newEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }
+    currentLyricIndex = idx;
+  }
+}
+
+// --- Initialization & event wiring ---
 async function init() {
   // Put UI into loading state and hide text + art until we finish
   container.classList.add('loading');
@@ -188,13 +325,13 @@ async function init() {
   titleEl.textContent = '';
   artistEl.textContent = '';
   coverImg.style.visibility = 'hidden';
+  hideLyrics();
 
   // Attach event listeners for playback/progress
   playBtn.addEventListener('click', (e) => {
     e.preventDefault();
     togglePlay();
   });
-  // prev/next are placeholders for now (no playlist implemented)
   if (prevBtn) prevBtn.addEventListener('click', () => { audio.currentTime = 0; });
   if (nextBtn) nextBtn.addEventListener('click', () => { audio.currentTime = 0; });
 
@@ -203,21 +340,19 @@ async function init() {
   audio.addEventListener('play', syncPlayButtonIcon);
   audio.addEventListener('pause', syncPlayButtonIcon);
   audio.addEventListener('ended', () => {
-    // on end, show play icon
     playBtn.classList.remove('fa-pause');
     playBtn.classList.add('fa-play');
   });
 
   if (progressContainer) {
     progressContainer.addEventListener('click', handleProgressClick);
-    // support touch seeking
     progressContainer.addEventListener('touchstart', (e) => {
       handleProgressClick(e);
       e.preventDefault();
     }, { passive: false });
   }
 
-  // If audio has a src attribute, attempt to read tags via URL Reader
+  // If audio has a src attribute, attempt to read tags via URL Reader and try to load .lrc
   const urlAttr = audio.getAttribute('src');
   const url = urlAttr || audio.src;
   if (url) {
@@ -228,17 +363,16 @@ async function init() {
       if (!tags.title) titleEl.textContent = getFilenameFromSrc(absoluteUrl);
       if (!tags.picture) coverImg.style.visibility = 'hidden';
     } catch (err) {
-      // Timeout or other failure: show filename as title and no cover (still hidden)
       titleEl.textContent = getFilenameFromSrc(absoluteUrl) || '';
       artistEl.textContent = '';
       console.warn('Could not read tags from URL (CORS, timeout or not accessible). Fallback to filename.', err);
     } finally {
       revealUI();
-      // sync play icon in case audio is paused (most likely)
       syncPlayButtonIcon();
+      // attempt to load .lrc (fire-and-forget)
+      loadLrcForAudioUrl(absoluteUrl);
     }
   } else {
-    // No src configured; just reveal empty UI so user can pick a file
     revealUI();
     syncPlayButtonIcon();
   }
@@ -256,6 +390,7 @@ fileInput.addEventListener('change', async (e) => {
   titleEl.textContent = '';
   artistEl.textContent = '';
   coverImg.style.visibility = 'hidden';
+  hideLyrics();
 
   // point audio to the selected file (object URL) but do not play it
   const objectUrl = URL.createObjectURL(file);
@@ -278,6 +413,8 @@ fileInput.addEventListener('change', async (e) => {
   } finally {
     revealUI();
     syncPlayButtonIcon();
+    // For user-picked local file, .lrc next to the audio file won't be reachable.
+    // You could allow uploading a .lrc file in the UI — we did not add upload here.
   }
 });
 
