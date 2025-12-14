@@ -9,9 +9,9 @@
     <link rel="stylesheet" href="style.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jsmediatags/3.9.5/jsmediatags.min.js"></script>
 
-    <!-- Minimal styles used to hide the UI while metadata loads and to style lyrics -->
+    <!-- Updated styles: larger lyric viewer, more visible text, and hidden scrollbars -->
     <style>
-      /* While loading, hide the main UI pieces (keeps layout stable if you want) */
+      /* Keep overall loading hiding behavior */
       .player-container.loading .img-container img,
       .player-container.loading h2,
       .player-container.loading h3,
@@ -26,7 +26,7 @@
         display: flex;
         justify-content: center;
         align-items: center;
-        min-height: 140px; /* space for album art area */
+        min-height: 160px;
       }
       .spinner {
         width: 44px;
@@ -38,43 +38,72 @@
       }
       @keyframes spin { to { transform: rotate(360deg); } }
 
-      /* Lyrics area (Spotify-like centered current line, faded neighbors) */
+      /* Hide native scrollbars site-wide but keep scrolling functionality.
+         This visually removes scrollbars while allowing inner containers to scroll. */
+      html, body {
+        height: 100%;
+        scrollbar-width: none; /* Firefox */
+      }
+      html::-webkit-scrollbar, body::-webkit-scrollbar {
+        display: none; /* WebKit */
+      }
+
+      /* Lyrics area: larger and more readable (Spotify-like centered current line) */
       .lyrics-wrapper {
         width: 100%;
-        max-height: 220px;
-        margin: 12px 0 0;
-        overflow: hidden; /* hide overflow; we will scroll inner container */
+        max-height: 360px; /* increased height */
+        margin: 18px 0 0;
+        overflow: hidden;
         display: flex;
         justify-content: center;
         align-items: center;
+        padding: 0 12px;
       }
       .lyrics {
         width: 100%;
-        max-height: 220px;
-        overflow-y: auto;
+        max-height: 360px; /* match wrapper height */
+        overflow-y: auto; /* allow scrolling, scrollbar is hidden visually */
         -webkit-overflow-scrolling: touch;
-        padding: 8px 12px;
+        padding: 12px 8px;
         box-sizing: border-box;
         text-align: center;
       }
+      /* remove visible scrollbars for lyrics container (covers WebKit and Firefox) */
+      .lyrics::-webkit-scrollbar { display: none; width: 0; height: 0; }
+      .lyrics { scrollbar-width: none; -ms-overflow-style: none; }
+
       .lyrics-line {
-        color: rgba(255,255,255,0.55);
-        font-size: 15px;
-        line-height: 1.6;
-        margin: 8px 0;
+        color: rgba(255,255,255,0.5);
+        font-size: 18px; /* larger base font for readability */
+        line-height: 1.9;
+        margin: 10px 0;
         transition: color 160ms linear, transform 160ms linear, font-size 160ms linear;
         will-change: transform, color;
         pointer-events: none;
+        text-shadow: 0 1px 0 rgba(0,0,0,0.35);
       }
       .lyrics-line.current {
         color: #ffffff;
-        font-size: 18px;
-        font-weight: 600;
-        transform: scale(1.02);
+        font-size: 22px; /* bigger for current line */
+        font-weight: 700;
+        transform: scale(1.03);
+        text-shadow: 0 2px 6px rgba(0,0,0,0.45);
       }
 
-      /* Hide lyrics wrapper if no lyrics */
+      /* Make sure the lyrics area is hidden entirely when not used */
       .lyrics-wrapper.hidden { display: none; }
+
+      /* Slightly increase spacing for player controls so lyrics have room */
+      .player-controls {
+        margin-top: 12px;
+      }
+
+      /* Responsive adjustments */
+      @media (max-width: 540px) {
+        .lyrics-wrapper { max-height: 260px; margin-top: 12px; }
+        .lyrics-line { font-size: 16px; line-height: 1.8; }
+        .lyrics-line.current { font-size: 20px; }
+      }
     </style>
 </head>
 <body>
