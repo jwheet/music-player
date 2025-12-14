@@ -1,5 +1,6 @@
 /* script.js
    Reads metadata (title, artist, cover) using jsmediatags and updates the UI.
+   The UI stays hidden until metadata read completes (success or failure).
    Cover is taken from the audio file and kept static unless user picks a new file.
 */
 
@@ -8,13 +9,14 @@ const fileInput = document.getElementById('file-input');
 const titleEl = document.getElementById('title');
 const artistEl = document.getElementById('artist');
 const coverImg = document.querySelector('.img-container img');
+const container = document.getElementById('player-container');
+const spinnerWrapper = document.getElementById('spinner-wrapper');
 
 // Helper to convert picture object from jsmediatags to data URL
 function pictureToDataURL(picture) {
   if (!picture || !picture.data) return null;
   const byteArray = picture.data;
   let binary = '';
-  // build binary string (this is fine for typical cover sizes)
   for (let i = 0; i < byteArray.length; i++) {
     binary += String.fromCharCode(byteArray[i]);
   }
@@ -22,10 +24,12 @@ function pictureToDataURL(picture) {
   return `data:${picture.format};base64,${base64}`;
 }
 
-// Set UI fields; keep cover static (won't overwrite unless coverArg passed and user changed file)
-function setMetadata({ title, artist, picture }, options = { setCover: true }) {
-  titleEl.textContent = title || titleEl.textContent || getFilenameFromSrc(audio.src) || 'Unknown';
-  artistEl.textContent = artist || artistEl.textContent || 'Unknown';
+// Set UI fields; when called we populate the UI but do not autoplay anything.
+// options.setCover: whether to overwrite the cover image
+function setMetadata({ title, artist, picture } = {}, options = { setCover: true }) {
+  // Only set provided values; if undefined leave as-is.
+  titleEl.textContent = title || titleEl.textContent || '';
+  artistEl.textContent = artist || artistEl.textContent || '';
   if (options.setCover && picture) {
     const dataUrl = pictureToDataURL(picture);
     if (dataUrl) coverImg.src = dataUrl;
@@ -37,13 +41,13 @@ function getFilenameFromSrc(src) {
   if (!src) return '';
   try {
     const url = new URL(src, location.href);
-    return url.pathname.split('/').pop();
+    return decodeURIComponent(url.pathname.split('/').pop());
   } catch (e) {
     return src.split('/').pop();
   }
 }
 
-// Try to read tags from a URL (this may fail if server/CORS doesn't allow access)
+// Try to read tags from a URL (may fail on GitHub Pages due to CORS)
 function readTagsFromUrl(url) {
   return new Promise((resolve, reject) => {
     try {
@@ -81,21 +85,40 @@ function readTagsFromFile(file) {
   });
 }
 
-// Initialize: try to read metadata for audio.src (default file). If it fails, fall back to filename.
+// Reveal UI (remove loading state)
+function revealUI() {
+  container.classList.remove('loading');
+  if (spinnerWrapper) spinnerWrapper.style.display = 'none';
+}
+
+// Initialize: try to read metadata for audio.src (default file). Keep UI hidden until done.
 async function init() {
-  // If audio has a src and it's not an object URL, attempt to read tags via URL Reader
-  if (audio.src) {
-    const url = audio.getAttribute('src') || audio.src;
-    // build absolute URL relative to page so Reader can fetch it
+  // Ensure UI is in loading state
+  container.classList.add('loading');
+  if (spinnerWrapper) spinnerWrapper.style.display = '';
+
+  // If audio has a src attribute, attempt to read tags via URL Reader
+  const urlAttr = audio.getAttribute('src');
+  const url = urlAttr || audio.src;
+  if (url) {
     const absoluteUrl = new URL(url, location.href).href;
     try {
       const tags = await readTagsFromUrl(absoluteUrl);
       setMetadata(tags, { setCover: true });
+      // If title/artist missing, fallback to filename for title only
+      if (!tags.title) titleEl.textContent = getFilenameFromSrc(absoluteUrl);
     } catch (err) {
-      // Can't read tags from URL (likely CORS); use filename fallback
-      titleEl.textContent = getFilenameFromSrc(absoluteUrl);
+      // Could not read tags from URL (likely CORS). Use filename fallback.
+      titleEl.textContent = getFilenameFromSrc(absoluteUrl) || '';
+      artistEl.textContent = '';
       console.warn('Could not read tags from URL (CORS or not accessible). Fallback to filename.', err);
+    } finally {
+      // Reveal UI regardless of success or failure
+      revealUI();
     }
+  } else {
+    // No src configured; just reveal empty UI so user can pick a file
+    revealUI();
   }
 }
 
@@ -105,25 +128,30 @@ fileInput.addEventListener('change', async (e) => {
   if (!files || files.length === 0) return;
   const file = files[0];
 
-  // point audio to the selected file
+  // Keep UI in loading while reading file tags
+  container.classList.add('loading');
+  if (spinnerWrapper) spinnerWrapper.style.display = '';
+
+  // point audio to the selected file (object URL) but do not play it
   const objectUrl = URL.createObjectURL(file);
   audio.src = objectUrl;
   audio.load();
 
   try {
     const tags = await readTagsFromFile(file);
-    // When user explicitly picks a file, update cover/title/artist (cover will overwrite previous)
+    // Update title/artist/cover (cover will overwrite previous)
     setMetadata(tags, { setCover: true });
+    if (!tags.title) titleEl.textContent = file.name;
+    if (!tags.artist) artistEl.textContent = '';
   } catch (err) {
     // If reading tags fails, fallback to filename
     titleEl.textContent = file.name;
-    artistEl.textContent = 'Unknown';
+    artistEl.textContent = '';
     console.warn('Could not read tags from selected file.', err);
+  } finally {
+    revealUI();
   }
 });
-
-// If you have UI that programmatically changes tracks, ensure you only call setMetadata when you want to change title/cover.
-// This preserves a "static" cover behaviour: it will not change unless a new file is explicitly loaded or metadata read is triggered.
 
 // Kick off initial load
 init();
