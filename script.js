@@ -1,153 +1,129 @@
-const { jsmediatags } = window;
-const playerContainer = document.getElementById("player-container");
-const image = document.querySelector("img");
-const inputFiles = document.getElementById("file-input");
-const titleEl = document.getElementById("title");
-const artistEl = document.getElementById("artist");
-const music = document.querySelector("audio");
-const progressContainer = document.getElementById("progress-container");
-const progress = document.getElementById("progress");
-const currentTimeEl = document.getElementById("current-time");
-const durationEl = document.getElementById("duration");
-const prev = document.getElementById("prev");
-const play = document.getElementById("play");
-const next = document.getElementById("next");
-let image_blur = 'https://e-cdns-images.dzcdn.net/images/cover/256d2f17d6dfde632b845e757ac41746/500x500-000000-80-0-0.jpg';
-let isPlaying = false;
-let currentSongIndex = 0;
-let songList = [];
+/* script.js
+   Reads metadata (title, artist, cover) using jsmediatags and updates the UI.
+   Cover is taken from the audio file and kept static unless user picks a new file.
+*/
 
-function getImgColor() {
-    const colorThief = new ColorThief();
-    if (image.complete)
-        color = colorThief.getColor(image);
-    return color;
+const audio = document.getElementById('audio');
+const fileInput = document.getElementById('file-input');
+const titleEl = document.getElementById('title');
+const artistEl = document.getElementById('artist');
+const coverImg = document.querySelector('.img-container img');
+
+// Helper to convert picture object from jsmediatags to data URL
+function pictureToDataURL(picture) {
+  if (!picture || !picture.data) return null;
+  const byteArray = picture.data;
+  let binary = '';
+  // build binary string (this is fine for typical cover sizes)
+  for (let i = 0; i < byteArray.length; i++) {
+    binary += String.fromCharCode(byteArray[i]);
+  }
+  const base64 = btoa(binary);
+  return `data:${picture.format};base64,${base64}`;
 }
 
-function playSong() {
-    document.body.style.backgroundImage = `url('${image_blur}')`;
-    const [ r, g, b ] = getImgColor();
-    playerContainer.style.backgroundColor = `rgb(${r}, ${g}, ${b}, 0.5)`;
-    play.classList.replace("fa-play", "fa-pause");
-    play.setAttribute("title", "Pause");
-    if (!isPlaying) {
-        music.play();
+// Set UI fields; keep cover static (won't overwrite unless coverArg passed and user changed file)
+function setMetadata({ title, artist, picture }, options = { setCover: true }) {
+  titleEl.textContent = title || titleEl.textContent || getFilenameFromSrc(audio.src) || 'Unknown';
+  artistEl.textContent = artist || artistEl.textContent || 'Unknown';
+  if (options.setCover && picture) {
+    const dataUrl = pictureToDataURL(picture);
+    if (dataUrl) coverImg.src = dataUrl;
+  }
+}
+
+// fallback filename extraction
+function getFilenameFromSrc(src) {
+  if (!src) return '';
+  try {
+    const url = new URL(src, location.href);
+    return url.pathname.split('/').pop();
+  } catch (e) {
+    return src.split('/').pop();
+  }
+}
+
+// Try to read tags from a URL (this may fail if server/CORS doesn't allow access)
+function readTagsFromUrl(url) {
+  return new Promise((resolve, reject) => {
+    try {
+      new jsmediatags.Reader(url)
+        .setTagsToRead(['title', 'artist', 'picture'])
+        .read({
+          onSuccess: function(tag) {
+            resolve(tag.tags);
+          },
+          onError: function(error) {
+            reject(error);
+          }
+        });
+    } catch (err) {
+      reject(err);
     }
-    isPlaying = true;
+  });
 }
 
-function pauseSong() {
-    isPlaying = false;
-    playerContainer.style.backgroundColor = `rgb(231, 231, 231, 0.5)`;
-    document.body.style.backgroundImage = '';
-    play.classList.replace("fa-pause", "fa-play");
-    play.setAttribute("title", "Play");
-    music.pause();
-}
-
-function updateProgressBar(event) {
-    if (isPlaying) {
-        const { currentTime, duration } = event.srcElement;
-        progress.style.width = `${(currentTime / duration) * 100}%`;
-        const durationMinutes = Math.floor(duration / 60);
-        let durationSeconds = Math.floor(duration % 60);
-        if (durationSeconds < 10) {
-            durationSeconds = `0${durationSeconds}`;
-        }
-        const currentTimeMinutes = Math.floor(currentTime / 60);
-        let currentTimeSeconds = Math.floor(currentTime % 60);
-        if (currentTimeSeconds < 10) {
-            currentTimeSeconds = `0${currentTimeSeconds}`;
-        }
-        if (!durationSeconds) {
-            durationEl.textContent = '0:00';
-        }
-        else {
-            durationEl.textContent = `${durationMinutes}:${durationSeconds}`;
-        }
-        currentTimeEl.textContent = `${currentTimeMinutes}:${currentTimeSeconds}`;
-    }
-}
-
-function setProgressBar(event) {
-    const width = this.clientWidth;
-    const clicks = event.offsetX;
-    const { duration } = music;
-    music.currentTime = (clicks / width) * duration;
-}
-
-function playNext() {
-    isPlaying = false;
-    currentSongIndex++;
-    if (currentSongIndex > songList.length - 1) {
-        currentSongIndex = 0;
-    }
-    newAudioFile(currentSongIndex)
-}
-
-function playPrevious() {
-    isPlaying = false;
-    currentSongIndex--;
-    if (currentSongIndex === -1) {
-        currentSongIndex = songList.length - 1;
-    }
-    console.log(currentSongIndex);
-    newAudioFile(currentSongIndex);
-}
-
-function newAudioFile(index) {
-    const file = songList[index];
-    jsmediatags.read(file, {
-        onSuccess: function (tag) {
-            console.log(tag.tags.artist);
-            const { data, format } = tag.tags.picture;
-            let base64String = "";
-            for (let i = 0; i < data.length; i++) {
-                base64String += String.fromCharCode(data[i]);
-            }
-            let { title, artist } = tag.tags;
-            if (title.length > 30) {
-                title = `${title.substring(0, 30)}...`
-            }
-            if (artist.length > 30) {
-                artist = `${artist.substring(0, 30)}...`
-            }
-            titleEl.textContent = title;
-            artistEl.textContent = artist;
-            image.src = image_blur = `data:${format};base64,${window.btoa(base64String)}`;
-            music.src = URL.createObjectURL(file);
-            music.load();
-            playSong();
+// Read tags from a File object (preferred when user picks local file)
+function readTagsFromFile(file) {
+  return new Promise((resolve, reject) => {
+    try {
+      jsmediatags.read(file, {
+        onSuccess: function(tag) {
+          resolve(tag.tags);
         },
-        onError: function (error) {
-            console.log(error);
-        },
-    });
+        onError: function(err) {
+          reject(err);
+        }
+      });
+    } catch (err) {
+      reject(err);
+    }
+  });
 }
 
-function loadAudioFiles(event) {
-    let { files } = this;
-    let file;
-    for (let i = 0; i < files.length; i++) {
-        file = files.item(i);
-        file = files[i];
-        songList.push(file);
+// Initialize: try to read metadata for audio.src (default file). If it fails, fall back to filename.
+async function init() {
+  // If audio has a src and it's not an object URL, attempt to read tags via URL Reader
+  if (audio.src) {
+    const url = audio.getAttribute('src') || audio.src;
+    // build absolute URL relative to page so Reader can fetch it
+    const absoluteUrl = new URL(url, location.href).href;
+    try {
+      const tags = await readTagsFromUrl(absoluteUrl);
+      setMetadata(tags, { setCover: true });
+    } catch (err) {
+      // Can't read tags from URL (likely CORS); use filename fallback
+      titleEl.textContent = getFilenameFromSrc(absoluteUrl);
+      console.warn('Could not read tags from URL (CORS or not accessible). Fallback to filename.', err);
     }
-    if (!isPlaying) {
-        newAudioFile(currentSongIndex);
-    }
+  }
 }
 
-inputFiles.addEventListener("change", loadAudioFiles);
-play.addEventListener("click", () => (isPlaying ? pauseSong() : playSong()));
-music.addEventListener("timeupdate", updateProgressBar);
-progressContainer.addEventListener("click", setProgressBar);
-next.addEventListener('click', playNext);
-prev.addEventListener('click', playPrevious);
-music.addEventListener('ended', playNext);
-document.addEventListener('keypress', (e) => {
-    console.log(e);
-    if (e.key === ' ') {
-        isPlaying ? pauseSong() : playSong();
-    }
-})
+// Handle user selecting a file (prefer reading tags from File object)
+fileInput.addEventListener('change', async (e) => {
+  const files = e.target.files;
+  if (!files || files.length === 0) return;
+  const file = files[0];
+
+  // point audio to the selected file
+  const objectUrl = URL.createObjectURL(file);
+  audio.src = objectUrl;
+  audio.load();
+
+  try {
+    const tags = await readTagsFromFile(file);
+    // When user explicitly picks a file, update cover/title/artist (cover will overwrite previous)
+    setMetadata(tags, { setCover: true });
+  } catch (err) {
+    // If reading tags fails, fallback to filename
+    titleEl.textContent = file.name;
+    artistEl.textContent = 'Unknown';
+    console.warn('Could not read tags from selected file.', err);
+  }
+});
+
+// If you have UI that programmatically changes tracks, ensure you only call setMetadata when you want to change title/cover.
+// This preserves a "static" cover behaviour: it will not change unless a new file is explicitly loaded or metadata read is triggered.
+
+// Kick off initial load
+init();
