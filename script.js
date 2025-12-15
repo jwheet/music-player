@@ -50,7 +50,7 @@ const PLAYLIST_CACHE_DURATION = 60 * 60 * 1000; // 1 hour
 const colorThief = window.ColorThief ? new window.ColorThief() : null;
 
 // ASCII Art Banner
-console.log(`                                ==
+console.log(`                                            ==
                                           =======
                                        ===========
                                          =============         *===
